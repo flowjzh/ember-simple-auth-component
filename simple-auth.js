@@ -419,9 +419,14 @@ define("simple-auth/configuration",
         @method load
         @private
       */
-      load: loadConfig(defaults, function(container, config) {
-        this.applicationRootUrl = container.lookup('router:main').get('rootURL') || '/';
-      })
+      load: loadConfig(defaults),
+
+      /**
+        @property _setupDone
+        @default false
+        @private
+      */
+      _setupDone: false
     };
   });
 define("simple-auth/ember", 
@@ -435,28 +440,40 @@ define("simple-auth/ember",
     });
   });
 define("simple-auth/initializer", 
-  ["./configuration","./utils/get-global-config","./setup","exports"],
-  function(__dependency1__, __dependency2__, __dependency3__, __exports__) {
+  ["./session","./stores/local-storage","./stores/ephemeral","./utils/get-global-config","./configuration","exports"],
+  function(__dependency1__, __dependency2__, __dependency3__, __dependency4__, __dependency5__, __exports__) {
     "use strict";
-    var Configuration = __dependency1__["default"];
-    var getGlobalConfig = __dependency2__["default"];
-    var setup = __dependency3__["default"];
+    var Session = __dependency1__["default"];
+    var LocalStorage = __dependency2__["default"];
+    var Ephemeral = __dependency3__["default"];
+
+    var getGlobalConfig = __dependency4__["default"];
+    var Configuration = __dependency5__["default"];
 
     __exports__["default"] = {
-      name:       'simple-auth',
-      initialize: function(container, application) {
+      name: "simple-auth",
+      initialize: function(_, application){
+        // load the default config without the container
         var config = getGlobalConfig('simple-auth');
-        Configuration.load(container, config);
-        setup(container, application);
+        Configuration.load(config);
+
+        application.register('simple-auth-session-store:local-storage', LocalStorage);
+        application.register('simple-auth-session-store:ephemeral', Ephemeral);
+        application.register('simple-auth-session:main', Session);
+
+        // only inject stuff here.
+        Ember.A(['controller', 'route', 'component']).forEach(function(component) {
+          application.inject(component, Configuration.sessionPropertyName, Configuration.session);
+        });
       }
     };
   });
 define("simple-auth/mixins/application-route-mixin", 
-  ["./../configuration","exports"],
-  function(__dependency1__, __exports__) {
+  ["../configuration","../setup","exports"],
+  function(__dependency1__, __dependency2__, __exports__) {
     "use strict";
     var Configuration = __dependency1__["default"];
-
+    var setup = __dependency2__["default"];
     /**
       The mixin for the application route; defines actions that are triggered
       when authentication is required, when the session has successfully been
@@ -512,6 +529,11 @@ define("simple-auth/mixins/application-route-mixin",
         @private
       */
       beforeModel: function(transition) {
+        if(!Configuration._setupDone){
+          setup(this.container);
+          Configuration._setupDone = true;
+        }
+
         this._super(transition);
         if (!this.get('_authEventListenersAssigned')) {
           this.set('_authEventListenersAssigned', true);
@@ -1274,14 +1296,10 @@ define("simple-auth/session",
     });
   });
 define("simple-auth/setup", 
-  ["./configuration","./session","./stores/local-storage","./stores/ephemeral","exports"],
-  function(__dependency1__, __dependency2__, __dependency3__, __dependency4__, __exports__) {
+  ["./configuration","exports"],
+  function(__dependency1__, __exports__) {
     "use strict";
     var Configuration = __dependency1__["default"];
-    var Session = __dependency2__["default"];
-    var LocalStorage = __dependency3__["default"];
-    var Ephemeral = __dependency4__["default"];
-
     var wildcardToken = '_wildcard_token_';
 
     function extractLocationOrigin(location) {
@@ -1330,12 +1348,6 @@ define("simple-auth/setup",
       return Ember.A(crossOriginWhitelist).any(matchDomain(urlOrigin));
     }
 
-    function registerFactories(application) {
-      application.register('simple-auth-session-store:local-storage', LocalStorage);
-      application.register('simple-auth-session-store:ephemeral', Ephemeral);
-      application.register('simple-auth-session:main', Session);
-    }
-
     function ajaxPrefilter(options, originalOptions, jqXHR) {
       if (shouldAuthorizeRequest(options)) {
         jqXHR.__simple_auth_authorized__ = true;
@@ -1355,16 +1367,12 @@ define("simple-auth/setup",
       @method setup
       @private
     **/
-    __exports__["default"] = function(container, application) {
-      application.deferReadiness();
-      registerFactories(application);
+    __exports__["default"] = function(container) {
+      Configuration.applicationRootUrl = container.lookup('router:main').get('rootURL') || '/';
 
       var store   = container.lookup(Configuration.store);
       var session = container.lookup(Configuration.session);
       session.set('store', store);
-      Ember.A(['controller', 'route', 'component']).forEach(function(component) {
-        application.inject(component, Configuration.sessionPropertyName, Configuration.session);
-      });
 
       crossOriginWhitelist = Ember.A(Configuration.crossOriginWhitelist).map(function(origin) {
         return extractLocationOrigin(origin);
@@ -1386,10 +1394,7 @@ define("simple-auth/setup",
         Ember.Logger.info('No authorizer was configured for Ember Simple Auth - specify one if backend requests need to be authorized.');
       }
 
-      var advanceReadiness = function() {
-        application.advanceReadiness();
-      };
-      session.restore().then(advanceReadiness, advanceReadiness);
+      session.restore();
     }
   });
 define("simple-auth/stores/base", 
@@ -1634,16 +1639,13 @@ define("simple-auth/utils/load-config",
   ["exports"],
   function(__exports__) {
     "use strict";
-    __exports__["default"] = function(defaults, callback) {
-      return function(container, config) {
+    __exports__["default"] = function(defaults) {
+      return function(config) {
         var wrappedConfig = Ember.Object.create(config);
         for (var property in this) {
           if (this.hasOwnProperty(property) && Ember.typeOf(this[property]) !== 'function') {
             this[property] = wrappedConfig.getWithDefault(property, defaults[property]);
           }
-        }
-        if (callback) {
-          callback.apply(this, [container, config]);
         }
       };
     }
